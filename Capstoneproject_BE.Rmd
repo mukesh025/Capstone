@@ -1,0 +1,1157 @@
+---
+title: "Capstone_BE"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+library(dplyr)
+library(plyr)
+library(data.table)
+library(sqldf)
+library("forecast")
+library("zoo")
+# Read working directory path
+setwd("/Project/R/Capstoneproject")
+
+# Read Monthly TSAT Data from file
+MonthlyTSATData <- read.csv('TSAT_Monthly_With_BE.csv')
+colnames(MonthlyTSATData)[2]<-"Product_Family"
+colnames(MonthlyTSATData)[1]<-"Fiscal_Period_ID"
+colnames(MonthlyTSATData)[3]<-"Business_Entity"
+
+#Read EOL_PRODUCTS
+EOL_PRODUCTS <- read.csv('EOL_PRODUCTS.csv')
+colnames(EOL_PRODUCTS)[1]<-"Product_Family"
+
+#Remove EOl Products from TSAT Data
+
+#MonthlyTSATData <- sqldf("SELECT *
+#                                      FROM MonthlyTSATData where Product_Family not in 
+#                                      (select Product_Family from EOL_PRODUCTS)")
+
+
+#Get TSAT data Aggrgated at BE Level
+TSAT_agg_data<-ddply(MonthlyTSATData,c("Business_Entity","Fiscal_Period_ID"),summarize,
+                     mean = round(mean(TSAT),2))
+
+colnames(TSAT_agg_data)[3]<-"TSAT"
+head(TSAT_agg_data)
+summary(TSAT_agg_data)
+pairs(TSAT_agg_data[-1])
+hist(TSAT_agg_data$TSAT)
+
+
+# Read Bookings data from file
+Bookingbymonth <- read.csv('SVC_Bookings_Monthly_PF.csv')
+colnames(Bookingbymonth)[2]<-"Business_Entity"
+colnames(Bookingbymonth)[1]<-"Fiscal_Period_ID"
+colnames(Bookingbymonth)[4]<-"Product_Family"
+colnames(Bookingbymonth)[5]<-"Service_Bookings"
+
+
+#Remove EOl Products from Bookings Data
+
+#Bookingbymonth <- sqldf("SELECT *
+#                                      FROM Bookingbymonth where Product_Family not in 
+#                                      (select Product_Family from EOL_PRODUCTS)")
+
+
+#Get Bookings data Aggrgated at BE Level
+Bookings_agg_data<-ddply(Bookingbymonth,c("Business_Entity","Fiscal_Period_ID"),summarize,
+                         Service_Bookings = round(sum(Service_Bookings),2))
+
+
+head(Bookings_agg_data)
+summary(Bookingbymonth)
+hist(Bookingbymonth$Service_Bookings)
+
+BookingsbyTSATbyFiscalPeriod <- sqldf("SELECT Business_Entity,Fiscal_Period_ID,TSAT,Service_Bookings
+                                      FROM TSAT_agg_data
+                                      JOIN Bookings_agg_data USING(Business_Entity,Fiscal_Period_ID)")
+
+head(BookingsbyTSATbyFiscalPeriod)
+
+
+```
+
+## Including Analysis and Plots for "Ent Routing"
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "Ent Routing")
+#Missing Data for 2016 Jan
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets is look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Ent Routing ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Ent Routing ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#trying smoothing comparing additive and multiplicative model
+fit1 <- hw(BookingsFiscalPeriodts,seasonal="additive")
+fit2 <- hw(BookingsFiscalPeriodts,seasonal="multiplicative")
+
+plot(fit2,ylab="Service Bookings",
+     plot.conf=FALSE, type="o", fcol="white", xlab="Year")
+lines(fitted(fit1), col="red", lty=2)
+lines(fitted(fit2), col="green", lty=2)
+lines(fit1$mean, type="o", col="red")
+lines(fit2$mean, type="o", col="green")
+legend("topleft",lty=1, pch=1, col=1:3,
+       c("data","Holt Winters' Additive","Holt Winters' Multiplicative"))
+
+#Following plot compares additive seasonality and multiplicative seasonality
+states <- cbind(fit1$model$states[,1:3],fit2$model$states[,1:3])
+colnames(states) <- c("level","slope","seasonal","level","slope","seasonal")
+plot(states, xlab="Year")
+fit1$model$state[,1:3]
+fitted(fit1)
+fit1$mean
+
+
+#Now look at crosscorrleation 
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+## Including Analysis and Plots for "SP Video SW & Solutions"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "SP Video SW & Solutions")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for SP Video SW & Solutions")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Ent Routing ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for SP Video SW & Solutions")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for Ent Routing ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for SP Video SW & Solutions")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for SP Video SW & Solutions ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+## Including Analysis and Plots for "Switching"
+
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "Switching")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Switching")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Switching ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for Switching")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for Switching ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Ent Routing ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Switching ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+## Including Analysis and Plots for "Wireless"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "Wireless")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Switching")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Wireless ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for Switching")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for Wireless ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Wireless ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Wireless ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+## Including Analysis and Plots for "SP Routing"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "SP Routing")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Switching")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for SP Routing ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for Switching")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for SP Routing ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for SP Routing ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for SP Routing ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+## Including Analysis and Plots for "SP Video Infra"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "SP Video Infra")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Switching")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings forSP Video Infra ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for SP Video Infra")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for SP Video Infra ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for SP Video Infra ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for SP Video Infra ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+## Including Analysis and Plots for "SP Mobility"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "SP Mobility")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Switching")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for SP Mobility ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for Switching")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for SP Mobility ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for SP Mobility ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for SP Mobility ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+## Including Analysis and Plots for "Security"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "Security")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Switching")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Security ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for Security")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for Security ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Security ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Security ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+
+## Including Analysis and Plots for "IOT Software"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "IOT Software")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for IOT Software")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for IOT Software ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for IOT Software")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for IOT Software ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Security ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for IOT Software ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+## Including Analysis and Plots for "Computing Systems"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "Computing Systems")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Computing Systems")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Computing Systems ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for Computing Systems")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for Security ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Computing Systems ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Security ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
+
+
+
+## Including Analysis and Plots for "Coll"
+
+
+```{r, results='asis', echo=TRUE}
+
+############BE
+library(dplyr)
+BookingsbyTSATbyFiscalPeriodEnt <- filter(BookingsbyTSATbyFiscalPeriod, Business_Entity == "Coll")
+
+#Third column is TSAT so get TSAT time series by passing that column
+
+TSATbyFiscalPeriodts <- ts(BookingsbyTSATbyFiscalPeriodEnt[,3], start=c(2012, 1), end=c(2015, 12), frequency=12)
+#Fourth column is Bookings so get Bookings time series by passing that column
+BookingsFiscalPeriodts<-ts(BookingsbyTSATbyFiscalPeriodEnt[,4], start=c(2012, 1), end=c(2015, 12), frequency=12)
+
+plot(TSATbyFiscalPeriodts)
+plot(BookingsFiscalPeriodts)
+
+lag.plot(BookingsFiscalPeriodts,lag=12)
+acf(BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Coll")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Coll ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+
+#Lets us look at the trend for TSAT also look at seasonality
+fit <- stl ( TSATbyFiscalPeriodts, s.window=5 )
+plot(fit, main="TSAT for Coll")
+
+plot(TSATbyFiscalPeriodts, col="grey", main="Service Bookings for Coll") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(TSATbyFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Lets us look at the trend for bookings also look at seasonality
+fit <- stl ( BookingsFiscalPeriodts, s.window=5 )
+plot(fit, main="Service Bookings for Coll ")
+
+plot(BookingsFiscalPeriodts, col="grey", main="Service Bookings for Coll ") 
+lines(seasadj (fit), col="blue", ylab="Seasonally adjusted")
+lines(fit$time.series[ , 2], col="red", ylab="Trend")
+
+ma.trailing <- rollmean(BookingsFiscalPeriodts, k = 12, align = "right")
+plot(ma.trailing)
+
+diff_smooting<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting)
+
+#Now look at crosscorrleation without smoothing
+ccfvalues = ccf(BookingsbyTSATbyFiscalPeriodEnt[,3],BookingsbyTSATbyFiscalPeriodEnt[,4])
+
+
+#filter will not work with dplyr so we need to detach it first
+detach("package:dplyr", unload=TRUE)
+
+#Let us look at 12 month moving avergae to look at the overall trend
+BookingsbyFiscalPeriodts1<-filter(BookingsFiscalPeriodts/12,rep(1,12), sides = 1)
+TSATbyFiscalPeriodts1<-filter(TSATbyFiscalPeriodts/12,rep(1,12), sides = 1)
+
+plot(BookingsbyFiscalPeriodts1)
+plot(TSATbyFiscalPeriodts1)
+
+
+#Now we will apply double difference to take out yearly and then quarterly seasonality and look at cross correlation
+
+
+diff_smooting_booking<-diff(diff(BookingsFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_booking)
+
+
+diff_smooting_tsat<-diff(diff(TSATbyFiscalPeriodts, lag = 12),lag=3)
+plot(diff_smooting_tsat)
+
+
+ccfvalues =ccf(diff_smooting_tsat,diff_smooting_booking,lag=10)
+ccfvalues
+
+
+```
